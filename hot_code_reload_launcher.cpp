@@ -1,65 +1,21 @@
 #include <stdio.h>
+#include "common.cpp"
+#if PLATFORM_WINDOWS
 #include <windows.h>
-
-void CopyString(char *source, char *destination, int startIndex, int length)
-{
-    int destinationIndex = 0;
-    for(int sourceIndex = startIndex; sourceIndex < (startIndex + length); sourceIndex++, destinationIndex++)
-    {
-        destination[destinationIndex] = source[sourceIndex];
-    }
-}
-
-int StringLength(char *str)
-{
-    int length = 0;
-    while(str[length] != 0) length++;
-    return length;
-}
-
-void Concatenate(char *first, char *second)
-{
-    int lengthOfFirst = StringLength(first);
-    char *firstEnd = first + lengthOfFirst;
-    CopyString(second, firstEnd, 0, StringLength(second) + 1);
-}
-
-int GetDirectoryNameEndIndex(char *path)
-{
-    int result = 0;
-    for(int i = 0; path[i] != 0; i++)
-    {
-        if(path[i] == '\\' || path[i] == '/')
-        {
-            result = i - 1;
-        }
-    }
-    return result;
-}
-
-
-FILETIME GetLastWriteTime(char *filename)
-{
-    WIN32_FILE_ATTRIBUTE_DATA fileData = {};
-    GetFileAttributesEx(filename,GetFileExInfoStandard,&fileData);
-    return fileData.ftLastWriteTime;
-}
-
-int GetFilenameStartIndex(char *path)
-{
-    int result = 0;
-    int length = StringLength(path);
-    
-    for(int i = length - 1; i >= 0; i--)
-    {
-        if(path[i] == '\\' || path[i] == '/') 
-        {
-            result = i + 1; 
-            break;
-        }
-    }
-    return result;
-}
+#include "windows.cpp"
+#elif PLATFORM_LINUX
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <time.h>
+#include <errno.h>
+#include <unistd.h>
+#include <spawn.h>
+#include <signal.h>
+extern char **environ;
+#include "linux.cpp"
+#endif
 
 int main(int argc, char **argv)
 {
@@ -75,10 +31,19 @@ int main(int argc, char **argv)
     }
     
     char *exePath = argv[1];
-    FILETIME lastWriteTime = GetLastWriteTime(exePath);
+    Filetime lastWriteTime = GetLastWriteTime(exePath);
     
     char tempExePath[512] = {};
-    CopyString(exePath, tempExePath, 0, StringLength(exePath) - 4);
+    
+#if PLATFORM_WINDOWS
+    int extensionLength = 4;
+    char *tempExeSuffix = "_temp.exe";
+#elif PLATFORM_LINUX
+    int extensionLength = 0;
+    char *tempExeSuffix = "_temp";
+#endif
+    
+    CopyString(exePath, tempExePath, 0, StringLength(exePath) - extensionLength);
     
     char *baseDirectory;
     char temp[512] = {};
@@ -95,61 +60,35 @@ int main(int argc, char **argv)
     char filename[512] = {}; 
     CopyString(exePath, filename, GetFilenameStartIndex(exePath), StringLength(exePath) - GetFilenameStartIndex(exePath));
     
-    char cmdArgsBase[512] = {};
-    char cmdArgs[512] = {};
-    Concatenate(cmdArgsBase, filename);
-    Concatenate(cmdArgsBase, " ");
+    char *cmdArgs[] = {filename, "hcr_initialized", (char *)0}; 
     
-    CopyString(cmdArgsBase, cmdArgs, 0,  StringLength(cmdArgsBase));
-    Concatenate(cmdArgs, "hcr_initialized");
+    Concatenate(tempExePath, tempExeSuffix);
+    CopyFile(exePath, tempExePath);
     
-    Concatenate(tempExePath, "_temp.exe");
-    CopyFile(exePath, tempExePath, FALSE);
-    STARTUPINFO si = {0};
-    si.cb = sizeof(STARTUPINFO);
-    PROCESS_INFORMATION pi = {0};
-    CreateProcessA(tempExePath, cmdArgs, NULL, NULL, FALSE, 0, NULL, baseDirectory, &si, &pi);
-    
-    CopyString(cmdArgsBase, cmdArgs, 0,  StringLength(cmdArgsBase));
-    cmdArgs[StringLength(cmdArgsBase)] = '\0';
-    Concatenate(cmdArgs, "hcr_reloaded\0");
+    ProcessInformation pInfo = LaunchProcess(tempExePath, cmdArgs, baseDirectory);
+    cmdArgs[1] = "hcr_reloaded";
     
     bool running = true;
     while(running)
     {
-        FILETIME newLastWriteTime = GetLastWriteTime(exePath);
-        if(CompareFileTime(&lastWriteTime, &newLastWriteTime))
+        Filetime newLastWriteTime = GetLastWriteTime(exePath);
+        if(CompareFiletime(&lastWriteTime, &newLastWriteTime))
         {
-            Sleep(1000);
-            lastWriteTime = GetLastWriteTime(exePath);
+            SleepSeconds(1);
             
+            lastWriteTime = GetLastWriteTime(exePath);
             fprintf(stdout, "Exe has changed...\n");
-            TerminateProcess(pi.hProcess, 0);
-            // 500 ms timeout; use INFINITE for no timeout
+            
             fprintf(stdout, "Terminating current instance...\n");
-            const DWORD result = WaitForSingleObject(pi.hProcess, INFINITE);
-            if (result == WAIT_OBJECT_0) 
-            {
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                
-                CopyFile(exePath, tempExePath, FALSE);
-                fprintf(stdout, "Launching new instance...\n");
-                CreateProcessA(tempExePath, cmdArgs, NULL, NULL, FALSE, 0, NULL, baseDirectory, &si, &pi);
-            }
-            else 
-            {
-                fprintf(stderr, "Termination error\n");
-            }
+            KillProcess(pInfo);
+            CopyFile(exePath, tempExePath);
+            fprintf(stdout, "Launching new instance...\n");
+            pInfo = LaunchProcess(tempExePath, cmdArgs, baseDirectory);
         }
         else
         {
-            if(WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0)
-            {
-                running = false;
-            }
+            running = !(HasProcessExited(pInfo));
         }
     }
-    
     return 0;
 }
