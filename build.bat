@@ -10,4 +10,4 @@ set CommonLinkerFlags=user32.lib Gdi32.lib winmm.lib Ole32.lib
 
 cl  %FLAGS% %CommonCompilerFlags% ..\hot_code_reload_launcher.cpp /link %CommonLinkerFlags% -incremental:no
 
-cd ..
+popd
